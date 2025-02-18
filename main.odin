@@ -9,13 +9,13 @@ HEIGHT :: 600
 CELL_SIZE :: #config(CELL_SIZE, 8)
 
 View_Box :: struct {
-	min_bounds: [2]f32,
-	max_bounds: [2]f32,
+	min_bounds: [2]f64,
+	max_bounds: [2]f64,
 }
 
 Canvas :: struct {
 	using view_box: View_Box,
-	size: [2]f32,
+	size: [2]f64,
 	texture: ^sdl3.GPUTexture,
 	dirty: bool,
 }
@@ -58,7 +58,7 @@ main :: proc() {
 
 	main_loop: for {
 		curr_ticks := sdl3.GetTicks()
-		delta_time := f32(curr_ticks - prev_ticks)/1000
+		delta_time := f64(curr_ticks - prev_ticks)/1000
 		prev_ticks = curr_ticks
 
 		for sdl3.PollEvent(&ev) {
@@ -74,8 +74,8 @@ main :: proc() {
 					sdl3.SetWindowFullscreen(window, fullscreen)
 				}
 			case .MOUSE_WHEEL:
-				mouse_position := screen_to_world(canvas, {ev.wheel.mouse_x, ev.wheel.mouse_y})
-				zoom(&canvas, mouse_position, 1.0 - 5.0 * ev.wheel.y * delta_time)
+				mouse_position := screen_to_world(canvas, {f64(ev.wheel.mouse_x), f64(ev.wheel.mouse_y)})
+				zoom(&canvas, mouse_position, 1.0 - 5.0 * f64(ev.wheel.y) * delta_time)
 			case .MOUSE_BUTTON_UP:
 				if ev.button.button == sdl3.BUTTON_LEFT {
 					mouse_held = false
@@ -86,8 +86,8 @@ main :: proc() {
 				}
 			case .MOUSE_MOTION:
 				if mouse_held {
-					mouse_delta := screen_to_world(canvas, {ev.motion.xrel, ev.motion.yrel}) - canvas.min_bounds
-					pan(&canvas, mouse_delta)
+					delta := screen_to_world(canvas, {f64(ev.motion.xrel), f64(ev.motion.yrel)}) - canvas.min_bounds
+					pan(&canvas, delta)
 				}
 			}
 		}
@@ -160,7 +160,7 @@ recompute :: proc(gpu: ^sdl3.GPUDevice, compute_pipeline: ^sdl3.GPUComputePipeli
 resize :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, width, height: u32) {
 	canvas.dirty = true
 	old_size := canvas.size
-	canvas.size = {f32(width), f32(height)}
+	canvas.size = {f64(width), f64(height)}
 	
 	size_diff := (canvas.size - old_size) * (canvas.max_bounds - canvas.min_bounds) / old_size
 	canvas.max_bounds += size_diff * 0.5
@@ -179,29 +179,29 @@ resize :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, width, height: u32) {
 	}))
 }
 
-pan :: proc(canvas: ^Canvas, delta: [2]f32) {
+pan :: proc(canvas: ^Canvas, delta: [2]f64) {
 	canvas.min_bounds -= delta
 	canvas.max_bounds -= delta
 	canvas.dirty = true
 }
 
-zoom :: proc(canvas: ^Canvas, pivot: [2]f32, scale: f32) {
+zoom :: proc(canvas: ^Canvas, pivot: [2]f64, scale: f64) {
 	zoom_around(&canvas.min_bounds, pivot, scale)
 	zoom_around(&canvas.max_bounds, pivot, scale)
 	canvas.dirty = true
 }
 
-zoom_around :: proc(v: ^[2]f32, pivot: [2]f32, zoom: f32) {
+zoom_around :: proc(v: ^[2]f64, pivot: [2]f64, zoom: f64) {
 	v^ -= pivot
 	v^ *= zoom
 	v^ += pivot
 }
 
-screen_to_world :: proc(c: Canvas, v: [2]f32) -> [2]f32 {
+screen_to_world :: proc(c: Canvas, v: [2]f64) -> [2]f64 {
 	return v * (c.max_bounds - c.min_bounds) / c.size + c.min_bounds
 }
 
-canvas_init :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, size: [2]f32, vb: View_Box) {
+canvas_init :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, size: [2]f64, vb: View_Box) {
 	canvas.view_box = vb
 	canvas.size = size
 	resize(canvas, gpu, u32(size.x), u32(size.y))
