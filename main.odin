@@ -1,14 +1,17 @@
 package main
 
 import "core:fmt"
+import "core:math"
 import "core:slice"
 import "core:strings"
-import m "core:math/linalg/glsl"
+import "core:math/linalg/glsl"
 import "vendor:sdl3"
 import mu "vendor:microui"
 
-WIDTH :: 800
-HEIGHT :: 600
+FACTOR :: 67
+WIDTH :: 15 * FACTOR
+HEIGHT :: 10 * FACTOR
+ZOOM_SPEED :: 0.25
 
 CELL_SIZE :: #config(CELL_SIZE, 8)
 
@@ -62,8 +65,8 @@ main :: proc() {
 
 	canvas: Canvas
 	canvas_init(&canvas, gpu, {WIDTH, HEIGHT}, View_Box{
-		min_bounds = {-2.5, -1.5},
-		max_bounds = {1.5, 1.5},
+		min_bounds = {(-WIDTH/FACTOR*0.1 - 0.5)*1.3, -HEIGHT/FACTOR*0.1*1.3},
+		max_bounds = {( WIDTH/FACTOR*0.1 - 0.5)*1.3,  HEIGHT/FACTOR*0.1*1.3},
 	})
 
 	comp_source := #load("./mandelbrot.comp.spv")
@@ -89,15 +92,12 @@ main :: proc() {
 	}
 
 	ev: sdl3.Event
-	prev_ticks := sdl3.GetTicks()
 	fullscreen: bool
+	zoom_level := 3.0
 
 	must(sdl3.StartTextInput(window))
 	main_loop: for {
 		free_all(context.temp_allocator)
-		curr_ticks := sdl3.GetTicks()
-		delta_time := f64(curr_ticks - prev_ticks)/1000
-		prev_ticks = curr_ticks
 
 		for sdl3.PollEvent(&ev) {
 			#partial switch ev.type {
@@ -121,7 +121,9 @@ main :: proc() {
 				mu.input_scroll(mu_ctx, i32(ev.wheel.x) * 30, i32(ev.wheel.y) * -30)
 				if mu_ctx.hover_root == nil {
 					mouse_position := screen_to_world(canvas, {f64(ev.wheel.mouse_x), f64(ev.wheel.mouse_y)})
-					zoom(&canvas, mouse_position, 1.0 - 5.0 * f64(ev.wheel.y) * delta_time)
+					t := math.sign(f64(ev.wheel.y))
+					zoom(&canvas, mouse_position, math.pow(2, -ZOOM_SPEED * t))
+					zoom_level += t * ZOOM_SPEED
 				}
 			case .MOUSE_BUTTON_UP, .MOUSE_BUTTON_DOWN:
 				mu_input_mouse_button(mu_ctx, ev.button)
@@ -135,7 +137,7 @@ main :: proc() {
 		}
 
 		mu.begin(mu_ctx)
-		if mu.window(mu_ctx, "Controls", {0, 0, 250, 100}) {
+		if mu.window(mu_ctx, "Controls", {0, 0, 240, 150}) {
 			mu.layout_row(mu_ctx, {90, -1})
 
 			mu.label(mu_ctx, "Max Iterations:")
@@ -147,6 +149,14 @@ main :: proc() {
 			if .CHANGE in mu.slider(mu_ctx, &params.escape_radius, 2, 80, 1) {
 				canvas.dirty = true
 			}
+
+			mu.label(mu_ctx, "Zoom Level:")
+			z := f32(zoom_level)
+			if .CHANGE in mu.slider(mu_ctx, &z, 1.0, 48.0, ZOOM_SPEED) {
+				center := (canvas.max_bounds + canvas.min_bounds)/2
+				zoom(&canvas, center, math.pow(2, zoom_level - f64(z)))
+				zoom_level = f64(z)
+			}
 		}
 		mu.end(mu_ctx)
 
@@ -154,16 +164,12 @@ main :: proc() {
 		for variant in mu.next_command_iterator(mu_ctx, &cmd) {
 			switch v in variant {
 			case ^mu.Command_Rect:
-				// fmt.println("rect:", v.rect)
 				draw_rect(&ui_ctx, v.rect, v.color)
 			case ^mu.Command_Text:
-				// fmt.println("text:", v.pos, v.str)
 				draw_text(&ui_ctx, v.str, v.pos, v.color)
 			case ^mu.Command_Icon:
-				// fmt.println("icon:", v.rect)
 				draw_icon(&ui_ctx, v.id, v.rect, v.color)
 			case ^mu.Command_Clip:
-				// fmt.println("clip:", v.rect)
 				clip(&ui_ctx, v.rect)
 			case ^mu.Command_Jump:
 				unreachable()
@@ -687,7 +693,7 @@ ui_context_init :: proc(ui_ctx: ^UI_Context, gpu: ^sdl3.GPUDevice, window: ^sdl3
 	}))
 	defer sdl3.ReleaseGPUShader(gpu, frag_shader)
 
-	rgba8_pixels := make([][4]u8, mu.DEFAULT_ATLAS_WIDTH * mu.DEFAULT_ATLAS_HEIGHT, context.temp_allocator)
+	rgba8_pixels := make([][4]u8, len(mu.default_atlas_alpha), context.temp_allocator)
 	for &t in soa_zip(alpha=mu.default_atlas_alpha[:], pixel=rgba8_pixels) {
 		t.pixel.rgb = 0xff
 		t.pixel.a = t.alpha
@@ -829,7 +835,7 @@ ui_draw :: proc(cmdbuf: ^sdl3.GPUCommandBuffer, ui_ctx: ^UI_Context, gpu: ^sdl3.
 		)
 	}
 
-	mvp := m.mat4Ortho3d(0, f32(width), f32(height), 0, 0, 1)
+	mvp := glsl.mat4Ortho3d(0, f32(width), f32(height), 0, 0, 1)
 	sdl3.PushGPUVertexUniformData(cmdbuf, 0, &mvp, size_of(mvp))
 
 	render_pass := sdl3.BeginGPURenderPass(cmdbuf, color_target, 1, nil)
