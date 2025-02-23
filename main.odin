@@ -30,7 +30,6 @@ Canvas :: struct {
 
 Params :: struct {
 	max_iter: f32,
-	escape_radius: f32,
 }
 
 main :: proc() {
@@ -88,7 +87,6 @@ main :: proc() {
 
 	params := Params{
 		max_iter = 400,
-		escape_radius = 20,
 	}
 
 	ev: sdl3.Event
@@ -142,11 +140,6 @@ main :: proc() {
 
 			mu.label(mu_ctx, "Max Iterations:")
 			if .CHANGE in mu.slider(mu_ctx, &params.max_iter, 50, 2000, 10) {
-				canvas.dirty = true
-			}
-
-			mu.label(mu_ctx, "Escape Radius:")
-			if .CHANGE in mu.slider(mu_ctx, &params.escape_radius, 2, 80, 1) {
 				canvas.dirty = true
 			}
 

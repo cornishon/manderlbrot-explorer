@@ -16,7 +16,6 @@ layout(set = 2, binding = 0, std140) uniform ViewBox {
 };
 layout(set = 2, binding = 1, std140) uniform Params {
     float max_iter;
-    float escape_radius;
 };
 
 dvec2 remap(dvec2 old_value, dvec2 old_min, dvec2 old_max, dvec2 new_min, dvec2 new_max) {
@@ -43,12 +42,11 @@ void main() {
     dvec2 c = remap(gl_GlobalInvocationID.xy, dvec2(0), imageSize(img), min_bounds, max_bounds);
     dvec2 z = dvec2(0);
 
-    double r2 = escape_radius * escape_radius;
     float iter_count = 0;
     while (true) {
         z = f(z, c);
         iter_count++;
-        if (dot(z, z) > r2) break;
+        if (dot(z, z) > 4.0) break;
         if (iter_count > max_iter) break;
     }
 
