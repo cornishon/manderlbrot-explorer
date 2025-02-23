@@ -4,7 +4,6 @@ import "core:fmt"
 import "core:slice"
 import "core:strings"
 import m "core:math/linalg/glsl"
-import "core:mem"
 import "vendor:sdl3"
 import mu "vendor:microui"
 
@@ -219,7 +218,13 @@ must_ptr :: proc(ptr: ^$T, expr := #caller_expression(ptr), location := #caller_
 	return ptr
 }
 
-recompute :: proc(cmdbuff: ^sdl3.GPUCommandBuffer, gpu: ^sdl3.GPUDevice, compute_pipeline: ^sdl3.GPUComputePipeline, canvas: ^Canvas, params: ^Params) {
+recompute :: proc(
+	cmdbuff: ^sdl3.GPUCommandBuffer,
+	gpu: ^sdl3.GPUDevice,
+	compute_pipeline: ^sdl3.GPUComputePipeline,
+	canvas: ^Canvas,
+	params: ^Params,
+) {
 	canvas.dirty = false
 	sdl3.PushGPUComputeUniformData(cmdbuff, 0, &canvas.view_box, size_of(canvas.view_box))
 	sdl3.PushGPUComputeUniformData(cmdbuff, 1, params, size_of(params))
@@ -817,9 +822,6 @@ ui_draw :: proc(cmdbuf: ^sdl3.GPUCommandBuffer, ui_ctx: ^UI_Context, gpu: ^sdl3.
 				size = 6 * u32(ui_ctx.buf_capacity) * size_of(u16),
 			}))
 		}
-
-		vertex_data_size := u32(size_of(Vertex) * len(ui_ctx.vertices))
-		index_data_size  := u32(size_of(u16) * len(ui_ctx.indices))
 
 		upload_to_gpu_buffer(cmdbuf, gpu,
 			{slice.to_bytes(ui_ctx.vertices[:]), ui_ctx.vbuf},
