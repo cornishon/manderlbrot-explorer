@@ -1,7 +1,12 @@
 package main
 
 import "core:fmt"
+import "core:slice"
+import "core:strings"
+import m "core:math/linalg/glsl"
+import "core:mem"
 import "vendor:sdl3"
+import mu "vendor:microui"
 
 WIDTH :: 800
 HEIGHT :: 600
@@ -21,9 +26,32 @@ Canvas :: struct {
 	dirty: bool,
 }
 
+Params :: struct {
+	max_iter: f32,
+	escape_radius: f32,
+}
+
 main :: proc() {
 	must(sdl3.Init({.VIDEO}))
 	defer sdl3.Quit()
+
+	mu_ctx := new(mu.Context)
+
+	mu.init(mu_ctx,
+		proc(_: rawptr, text: string) -> bool {
+			return sdl3.SetClipboardText(strings.clone_to_cstring(text, context.temp_allocator))
+		},
+		proc(_: rawptr) -> (text: string, ok: bool) {
+			if sdl3.HasClipboardText() {
+				return string(cstring(sdl3.GetClipboardText())), true
+			}
+			return
+		},
+	)
+	mu_ctx.style.colors[.WINDOW_BG].a = 127
+	mu_ctx.style.colors[.PANEL_BG].a = 127
+	mu_ctx.text_width = mu.default_atlas_text_width
+	mu_ctx.text_height = mu.default_atlas_text_height
 
 	sdl3.SetLogPriorities(.TRACE)
 
@@ -32,6 +60,12 @@ main :: proc() {
 	gpu := must(sdl3.CreateGPUDevice({.SPIRV}, ODIN_DEBUG, nil))
 
 	must(sdl3.ClaimWindowForGPUDevice(gpu, window))
+
+	canvas: Canvas
+	canvas_init(&canvas, gpu, {WIDTH, HEIGHT}, View_Box{
+		min_bounds = {-2.5, -1.5},
+		max_bounds = {1.5, 1.5},
+	})
 
 	comp_source := #load("./mandelbrot.comp.spv")
 	compute_pipeline := must(sdl3.CreateGPUComputePipeline(gpu, sdl3.GPUComputePipelineCreateInfo{
@@ -42,22 +76,24 @@ main :: proc() {
 		threadcount_x = CELL_SIZE,
 		threadcount_y = CELL_SIZE,
 		threadcount_z = 1,
-		num_uniform_buffers = 1,
+		num_uniform_buffers = 2,
 		num_readwrite_storage_textures = 1,
 		num_readonly_storage_buffers = 1,
 	}))
 
-	canvas: Canvas
-	canvas_init(&canvas, gpu, {WIDTH, HEIGHT}, View_Box{
-		min_bounds = {-2.5, -1.5},
-		max_bounds = {1.5, 1.5},
-	})
+	ui_ctx: UI_Context
+	ui_context_init(&ui_ctx, gpu, window)
+
+	params := Params{
+		max_iter = 400,
+		escape_radius = 20,
+	}
 
 	ev: sdl3.Event
 	prev_ticks := sdl3.GetTicks()
-	mouse_held: bool
 	fullscreen: bool
 
+	must(sdl3.StartTextInput(window))
 	main_loop: for {
 		free_all(context.temp_allocator)
 		curr_ticks := sdl3.GetTicks()
@@ -68,30 +104,70 @@ main :: proc() {
 			#partial switch ev.type {
 			case .QUIT, .WINDOW_CLOSE_REQUESTED:
 				break main_loop
+			case .TEXT_INPUT:
+				mu.input_text(mu_ctx, string(ev.text.text))
 			case .KEY_DOWN:
 				#partial switch ev.key.scancode {
 				case .ESCAPE:
 					break main_loop
-				case .F:
+				case .F11:
 					fullscreen = !fullscreen
 					sdl3.SetWindowFullscreen(window, fullscreen)
+				case:
+					mu_input_key(mu_ctx, ev.key)
 				}
+			case .KEY_UP:
+				mu_input_key(mu_ctx, ev.key)
 			case .MOUSE_WHEEL:
-				mouse_position := screen_to_world(canvas, {f64(ev.wheel.mouse_x), f64(ev.wheel.mouse_y)})
-				zoom(&canvas, mouse_position, 1.0 - 5.0 * f64(ev.wheel.y) * delta_time)
-			case .MOUSE_BUTTON_UP:
-				if ev.button.button == sdl3.BUTTON_LEFT {
-					mouse_held = false
+				mu.input_scroll(mu_ctx, i32(ev.wheel.x) * 30, i32(ev.wheel.y) * -30)
+				if mu_ctx.hover_root == nil {
+					mouse_position := screen_to_world(canvas, {f64(ev.wheel.mouse_x), f64(ev.wheel.mouse_y)})
+					zoom(&canvas, mouse_position, 1.0 - 5.0 * f64(ev.wheel.y) * delta_time)
 				}
-			case .MOUSE_BUTTON_DOWN:
-				if ev.button.button == sdl3.BUTTON_LEFT {
-					mouse_held = true
-				}
+			case .MOUSE_BUTTON_UP, .MOUSE_BUTTON_DOWN:
+				mu_input_mouse_button(mu_ctx, ev.button)
 			case .MOUSE_MOTION:
-				if mouse_held {
+				mu.input_mouse_move(mu_ctx, i32(ev.motion.x), i32(ev.motion.y))
+				if mu_ctx.hover_root == nil && .LEFT in ev.motion.state {
 					delta := screen_to_world(canvas, {f64(ev.motion.xrel), f64(ev.motion.yrel)}) - canvas.min_bounds
 					pan(&canvas, delta)
 				}
+			}
+		}
+
+		mu.begin(mu_ctx)
+		if mu.window(mu_ctx, "Controls", {0, 0, 250, 100}) {
+			mu.layout_row(mu_ctx, {90, -1})
+
+			mu.label(mu_ctx, "Max Iterations:")
+			if .CHANGE in mu.slider(mu_ctx, &params.max_iter, 50, 2000, 10) {
+				canvas.dirty = true
+			}
+
+			mu.label(mu_ctx, "Escape Radius:")
+			if .CHANGE in mu.slider(mu_ctx, &params.escape_radius, 2, 80, 1) {
+				canvas.dirty = true
+			}
+		}
+		mu.end(mu_ctx)
+
+		cmd: ^mu.Command
+		for variant in mu.next_command_iterator(mu_ctx, &cmd) {
+			switch v in variant {
+			case ^mu.Command_Rect:
+				// fmt.println("rect:", v.rect)
+				draw_rect(&ui_ctx, v.rect, v.color)
+			case ^mu.Command_Text:
+				// fmt.println("text:", v.pos, v.str)
+				draw_text(&ui_ctx, v.str, v.pos, v.color)
+			case ^mu.Command_Icon:
+				// fmt.println("icon:", v.rect)
+				draw_icon(&ui_ctx, v.id, v.rect, v.color)
+			case ^mu.Command_Clip:
+				// fmt.println("clip:", v.rect)
+				clip(&ui_ctx, v.rect)
+			case ^mu.Command_Jump:
+				unreachable()
 			}
 		}
 
@@ -103,12 +179,12 @@ main :: proc() {
 		must(sdl3.WaitAndAcquireGPUSwapchainTexture(cmdbuf, window, &swapchain_texture, &width, &height))
 
 		if width != u32(canvas.size.x) || height != u32(canvas.size.y) {
-			resize(&canvas, gpu, width, height)
+			canvas_resize(&canvas, gpu, width, height)
 		}
 
 		if swapchain_texture != nil {
 			if canvas.dirty {
-				recompute(gpu, compute_pipeline, &canvas)
+				recompute(cmdbuf, gpu, compute_pipeline, &canvas, &params)
 			}
 			sdl3.BlitGPUTexture(cmdbuf, sdl3.GPUBlitInfo{
 				source = {
@@ -121,8 +197,13 @@ main :: proc() {
 					w = width,
 					h = height,
 				},
-				load_op = .DONT_CARE,
+				load_op = .LOAD,
 			})
+
+			ui_draw(cmdbuf, &ui_ctx, gpu, width, height, &sdl3.GPUColorTargetInfo{
+				texture = swapchain_texture,
+			})
+
 		} else {
 			fmt.println("not rendering...")
 		}
@@ -138,12 +219,10 @@ must_ptr :: proc(ptr: ^$T, expr := #caller_expression(ptr), location := #caller_
 	return ptr
 }
 
-recompute :: proc(gpu: ^sdl3.GPUDevice, compute_pipeline: ^sdl3.GPUComputePipeline, canvas: ^Canvas) {
+recompute :: proc(cmdbuff: ^sdl3.GPUCommandBuffer, gpu: ^sdl3.GPUDevice, compute_pipeline: ^sdl3.GPUComputePipeline, canvas: ^Canvas, params: ^Params) {
 	canvas.dirty = false
-	cmdbuff := sdl3.AcquireGPUCommandBuffer(gpu)
-	defer must(sdl3.SubmitGPUCommandBuffer(cmdbuff))
-
-	sdl3.PushGPUComputeUniformData(cmdbuff, 0, &canvas.view_box, size_of(View_Box))
+	sdl3.PushGPUComputeUniformData(cmdbuff, 0, &canvas.view_box, size_of(canvas.view_box))
+	sdl3.PushGPUComputeUniformData(cmdbuff, 1, params, size_of(params))
 
 	texture_binding := sdl3.GPUStorageTextureReadWriteBinding{
 		texture = canvas.texture,
@@ -161,7 +240,7 @@ recompute :: proc(gpu: ^sdl3.GPUDevice, compute_pipeline: ^sdl3.GPUComputePipeli
 	)
 }
 
-resize :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, width, height: u32) {
+canvas_resize :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, width, height: u32) {
 	canvas.dirty = true
 	old_size := canvas.size
 	canvas.size = {f64(width), f64(height)}
@@ -175,7 +254,7 @@ resize :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, width, height: u32) {
 	canvas.texture = must(sdl3.CreateGPUTexture(gpu, sdl3.GPUTextureCreateInfo{
 		type = .D2,
 		format = .R32G32B32A32_FLOAT,
-		usage = {.COMPUTE_STORAGE_WRITE},
+		usage = {.SAMPLER, .COMPUTE_STORAGE_WRITE},
 		width = width,
 		height = height,
 		layer_count_or_depth = 1,
@@ -208,7 +287,7 @@ screen_to_world :: proc(c: Canvas, v: [2]f64) -> [2]f64 {
 canvas_init :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, size: [2]f64, vb: View_Box) {
 	canvas.view_box = vb
 	canvas.size = size
-	resize(canvas, gpu, u32(size.x), u32(size.y))
+	canvas_resize(canvas, gpu, u32(size.x), u32(size.y))
 
 	canvas.palette_buffer = must(sdl3.CreateGPUBuffer(gpu, sdl3.GPUBufferCreateInfo{
 		usage = {.COMPUTE_STORAGE_READ},
@@ -218,25 +297,7 @@ canvas_init :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, size: [2]f64, vb: Vie
 	cmdbuff := sdl3.AcquireGPUCommandBuffer(gpu)
 	defer must(sdl3.SubmitGPUCommandBuffer(cmdbuff))
 
-	tbuf := sdl3.CreateGPUTransferBuffer(gpu, sdl3.GPUTransferBufferCreateInfo{
-		usage = .UPLOAD,
-		size = size_of(COLORMAP),
-	})
-	defer sdl3.ReleaseGPUTransferBuffer(gpu, tbuf)
-
-	tmem := cast([^][4]f32) sdl3.MapGPUTransferBuffer(gpu, tbuf, false)
-	copy(tmem[:len(COLORMAP)], COLORMAP[:])
-	sdl3.UnmapGPUTransferBuffer(gpu, tbuf)
-
-	copy_pass := sdl3.BeginGPUCopyPass(cmdbuff)
-	defer sdl3.EndGPUCopyPass(copy_pass)
-
-	sdl3.UploadToGPUBuffer(
-		copy_pass,
-		{transfer_buffer = tbuf},
-		{buffer = canvas.palette_buffer, size = size_of(COLORMAP)},
-		false,
-	)
+	upload_to_gpu_buffer(cmdbuff, gpu, {slice.to_bytes(COLORMAP[:]), canvas.palette_buffer})
 }
 
 // https://github.com/pengnam/cOLORMAPs-from-MatPlotLib2.0/blob/master/inferno.m
@@ -498,4 +559,358 @@ COLORMAP := [256][4]f32{
 	{0.976511,0.989753,0.616760,1},
 	{0.982257,0.994109,0.631017,1},
 	{0.988362,0.998364,0.644924,1},
+}
+
+Vertex :: struct {
+	pos: [2]f32,
+	tex: [2]f32,
+	col: mu.Color,
+}
+
+UI_Context :: struct {
+	pipeline: ^sdl3.GPUGraphicsPipeline,
+	vertices: [dynamic]Vertex,
+	indices: [dynamic]u16,
+	vbuf: ^sdl3.GPUBuffer,
+	ibuf: ^sdl3.GPUBuffer,
+	buf_capacity: u32,
+	indices_flushed: u32,
+	clip_rect: Maybe(mu.Rect),
+	draw_calls: [dynamic]Draw_Call,
+	atlas_sampler: sdl3.GPUTextureSamplerBinding,
+}
+
+Draw_Call :: struct {
+	base_index: u32,
+	num_indices: u32,
+	clip: Maybe(mu.Rect),
+}
+
+push_quad :: proc(ctx: ^UI_Context, dst, src: mu.Rect, color: mu.Color) {
+	u0 := f32(src.x) / f32(mu.DEFAULT_ATLAS_WIDTH)
+	v0 := f32(src.y) / f32(mu.DEFAULT_ATLAS_HEIGHT)
+	u1 := f32(src.x + src.w) / f32(mu.DEFAULT_ATLAS_WIDTH)
+	v1 := f32(src.y + src.h) / f32(mu.DEFAULT_ATLAS_HEIGHT)
+	x0 := f32(dst.x)
+	y0 := f32(dst.y)
+	x1 := f32(dst.x + dst.w)
+	y1 := f32(dst.y + dst.h)
+
+	base_idx := u16(len(ctx.vertices))
+	append(&ctx.vertices,
+		Vertex{pos = {x0, y0}, tex = {u0, v0}, col = color}, // top left
+		Vertex{pos = {x0, y1}, tex = {u0, v1}, col = color}, // bottom left
+		Vertex{pos = {x1, y1}, tex = {u1, v1}, col = color}, // bottom right
+		Vertex{pos = {x1, y0}, tex = {u1, v0}, col = color}, // top right
+	)
+	append(&ctx.indices,
+		base_idx + 0,
+		base_idx + 1,
+		base_idx + 2,
+		base_idx + 0,
+		base_idx + 2,
+		base_idx + 3,
+	)
+}
+
+draw_rect :: proc(ctx: ^UI_Context, rect: mu.Rect, color: mu.Color) {
+	push_quad(ctx, rect, mu.default_atlas[mu.DEFAULT_ATLAS_WHITE], color)
+}
+
+flush :: proc(ctx: ^UI_Context) {
+	curr_index := u32(len(ctx.indices))
+	append(&ctx.draw_calls, Draw_Call{
+		base_index = ctx.indices_flushed,
+		num_indices = curr_index - ctx.indices_flushed,
+		clip = ctx.clip_rect,
+	})
+	ctx.indices_flushed = curr_index
+}
+
+clip :: proc(ctx: ^UI_Context, rect: mu.Rect) {
+	flush(ctx)
+	ctx.clip_rect = rect
+}
+
+draw_icon :: proc(ctx: ^UI_Context, id: mu.Icon, rect: mu.Rect, color: mu.Color) {
+	src := mu.default_atlas[id]
+	x := rect.x + (rect.w - src.w) / 2
+	y := rect.y + (rect.h - src.h) / 2
+	push_quad(ctx, {x, y, src.w, src.h}, src, color)
+}
+
+draw_text :: proc(ctx: ^UI_Context, text: string, pos: mu.Vec2, color: mu.Color) {
+	dst := mu.Rect{ pos.x, pos.y, 0, 0 }
+	for r in text {
+		chr := min(int(r), 127)
+		src := mu.default_atlas[mu.DEFAULT_ATLAS_FONT + chr]
+		dst.w = src.w
+		dst.h = src.h
+		push_quad(ctx, dst, src, color)
+		dst.x += dst.w
+	}
+}
+
+ui_context_reset :: proc(ui_ctx: ^UI_Context) {
+	clear(&ui_ctx.vertices)
+	clear(&ui_ctx.indices)
+	clear(&ui_ctx.draw_calls)
+	ui_ctx.clip_rect = nil
+	ui_ctx.indices_flushed = 0
+}
+
+ui_context_init :: proc(ui_ctx: ^UI_Context, gpu: ^sdl3.GPUDevice, window: ^sdl3.Window) {
+	vert_source := #load("./shader.vert.spv")
+	vert_shader := must(sdl3.CreateGPUShader(gpu, sdl3.GPUShaderCreateInfo{
+		code_size = len(vert_source),
+		code = raw_data(vert_source),
+		entrypoint = "main",
+		format = {.SPIRV},
+		stage = .VERTEX,
+		num_uniform_buffers = 1,
+	}))
+	defer sdl3.ReleaseGPUShader(gpu, vert_shader)
+
+	frag_source := #load("./shader.frag.spv")
+	frag_shader := must(sdl3.CreateGPUShader(gpu, sdl3.GPUShaderCreateInfo{
+		code_size = len(frag_source),
+		code = raw_data(frag_source),
+		entrypoint = "main",
+		format = {.SPIRV},
+		stage = .FRAGMENT,
+		num_samplers = 1,
+	}))
+	defer sdl3.ReleaseGPUShader(gpu, frag_shader)
+
+	rgba8_pixels := make([][4]u8, mu.DEFAULT_ATLAS_WIDTH * mu.DEFAULT_ATLAS_HEIGHT, context.temp_allocator)
+	for &t in soa_zip(alpha=mu.default_atlas_alpha[:], pixel=rgba8_pixels) {
+		t.pixel.rgb = 0xff
+		t.pixel.a = t.alpha
+	}
+
+	ui_ctx.atlas_sampler = sdl3.GPUTextureSamplerBinding{
+		texture = must(sdl3.CreateGPUTexture(gpu, sdl3.GPUTextureCreateInfo{
+			type = .D2,
+			format = .R8G8B8A8_UNORM,
+			usage = {.SAMPLER},
+			width = mu.DEFAULT_ATLAS_WIDTH,
+			height = mu.DEFAULT_ATLAS_HEIGHT,
+			layer_count_or_depth = 1,
+			num_levels = 1,
+		})),
+		sampler = must(sdl3.CreateGPUSampler(gpu, sdl3.GPUSamplerCreateInfo{
+			min_filter = .NEAREST,
+			mag_filter = .NEAREST,
+		})),
+	}
+
+	{
+		cmdbuff := sdl3.AcquireGPUCommandBuffer(gpu)
+		defer must(sdl3.SubmitGPUCommandBuffer(cmdbuff))
+
+		tbuf := must(sdl3.CreateGPUTransferBuffer(gpu, sdl3.GPUTransferBufferCreateInfo{
+			usage = .UPLOAD,
+			size = u32(size_of(rgba8_pixels[0]) * len(rgba8_pixels)),
+		}))
+		defer sdl3.ReleaseGPUTransferBuffer(gpu, tbuf)
+
+		tmem := cast([^][4]u8) sdl3.MapGPUTransferBuffer(gpu, tbuf, true)
+		copy(tmem[:len(rgba8_pixels)], rgba8_pixels)
+		sdl3.UnmapGPUTransferBuffer(gpu, tbuf)
+
+		copy_pass := sdl3.BeginGPUCopyPass(cmdbuff)
+		defer sdl3.EndGPUCopyPass(copy_pass)
+
+		sdl3.UploadToGPUTexture(copy_pass,
+			sdl3.GPUTextureTransferInfo{
+				transfer_buffer = tbuf,
+				pixels_per_row = mu.DEFAULT_ATLAS_WIDTH,
+				rows_per_layer = mu.DEFAULT_ATLAS_HEIGHT,
+			},
+			sdl3.GPUTextureRegion{
+				texture = ui_ctx.atlas_sampler.texture,
+				w = mu.DEFAULT_ATLAS_WIDTH,
+				h = mu.DEFAULT_ATLAS_HEIGHT,
+				d = 1,
+			},
+			true,
+		)
+	}
+
+	attributes := []sdl3.GPUVertexAttribute{
+		{
+			location = 0,
+			format = .FLOAT2,
+			offset = u32(offset_of(Vertex, pos)),
+		},
+		{
+			location = 1,
+			format = .FLOAT2,
+			offset = u32(offset_of(Vertex, tex)),
+		},
+		{
+			location = 2,
+			format = .UBYTE4_NORM,
+			offset = u32(offset_of(Vertex, col)),
+		},
+	}
+
+	ui_ctx.pipeline = must(sdl3.CreateGPUGraphicsPipeline(gpu, sdl3.GPUGraphicsPipelineCreateInfo{
+		vertex_shader = vert_shader,
+		fragment_shader = frag_shader,
+		primitive_type = .TRIANGLELIST,
+		vertex_input_state = sdl3.GPUVertexInputState{
+			num_vertex_buffers = 1,
+			vertex_buffer_descriptions = &sdl3.GPUVertexBufferDescription{
+				pitch = size_of(Vertex),
+				input_rate = .VERTEX,
+			},
+			num_vertex_attributes = u32(len(attributes)),
+			vertex_attributes = raw_data(attributes),
+		},
+		rasterizer_state = sdl3.GPURasterizerState{
+			cull_mode = .BACK,
+		},
+		target_info = sdl3.GPUGraphicsPipelineTargetInfo{
+			num_color_targets = 1,
+			color_target_descriptions = &sdl3.GPUColorTargetDescription{
+				format = sdl3.GetGPUSwapchainTextureFormat(gpu, window),
+				blend_state = sdl3.GPUColorTargetBlendState{
+					enable_blend = true,
+					alpha_blend_op = .ADD,
+					src_alpha_blendfactor = .ONE,
+					dst_alpha_blendfactor = .ZERO,
+					color_blend_op = .ADD,
+					src_color_blendfactor = .SRC_ALPHA,
+					dst_color_blendfactor = .ONE_MINUS_SRC_ALPHA,
+				},
+			},
+		},
+	}))
+}
+
+ui_draw :: proc(cmdbuf: ^sdl3.GPUCommandBuffer, ui_ctx: ^UI_Context, gpu: ^sdl3.GPUDevice, width, height: u32, color_target: ^sdl3.GPUColorTargetInfo) {
+	flush(ui_ctx)
+	// Upload vertex and index data to the GPU
+	if len(ui_ctx.indices) > 0 {
+		assert(len(ui_ctx.indices) <= int(max(u16)))
+
+		num_quads := len(ui_ctx.indices)/6
+		if num_quads > int(ui_ctx.buf_capacity) {
+			for ui_ctx.buf_capacity == 0 {
+				ui_ctx.buf_capacity = 256
+			}
+			for ui_ctx.buf_capacity < u32(num_quads) {
+				ui_ctx.buf_capacity *= 2
+			}
+			fmt.printfln("resizing buffers (new cap: {})", ui_ctx.buf_capacity)
+
+			sdl3.ReleaseGPUBuffer(gpu, ui_ctx.vbuf)
+			sdl3.ReleaseGPUBuffer(gpu, ui_ctx.ibuf)
+
+			ui_ctx.vbuf = must(sdl3.CreateGPUBuffer(gpu, sdl3.GPUBufferCreateInfo{
+				usage = {.VERTEX},
+				size = 4 * u32(ui_ctx.buf_capacity) * size_of(Vertex),
+			}))
+			ui_ctx.ibuf = must(sdl3.CreateGPUBuffer(gpu, sdl3.GPUBufferCreateInfo{
+				usage = {.INDEX},
+				size = 6 * u32(ui_ctx.buf_capacity) * size_of(u16),
+			}))
+		}
+
+		vertex_data_size := u32(size_of(Vertex) * len(ui_ctx.vertices))
+		index_data_size  := u32(size_of(u16) * len(ui_ctx.indices))
+
+		upload_to_gpu_buffer(cmdbuf, gpu,
+			{slice.to_bytes(ui_ctx.vertices[:]), ui_ctx.vbuf},
+			{slice.to_bytes(ui_ctx.indices[:]),  ui_ctx.ibuf},
+		)
+	}
+
+	mvp := m.mat4Ortho3d(0, f32(width), f32(height), 0, 0, 1)
+	sdl3.PushGPUVertexUniformData(cmdbuf, 0, &mvp, size_of(mvp))
+
+	render_pass := sdl3.BeginGPURenderPass(cmdbuf, color_target, 1, nil)
+	sdl3.BindGPUGraphicsPipeline(render_pass, ui_ctx.pipeline)
+	sdl3.BindGPUFragmentSamplers(render_pass, 0, &ui_ctx.atlas_sampler, 1)
+	sdl3.BindGPUVertexBuffers(render_pass, 0, &sdl3.GPUBufferBinding{buffer = ui_ctx.vbuf}, 1)
+	sdl3.BindGPUIndexBuffer(render_pass, sdl3.GPUBufferBinding{buffer = ui_ctx.ibuf}, ._16BIT)
+
+	for dc in ui_ctx.draw_calls {
+		if r, ok := dc.clip.(mu.Rect); ok {
+			sdl3.SetGPUScissor(render_pass, sdl3.Rect(r))
+		}
+		sdl3.DrawGPUIndexedPrimitives(render_pass, dc.num_indices, 1, dc.base_index, 0, 0)
+	}
+
+	sdl3.EndGPURenderPass(render_pass)
+	ui_context_reset(ui_ctx)
+}
+
+Transfer_Command :: struct {
+	data: []byte,
+	buffer: ^sdl3.GPUBuffer,
+}
+
+upload_to_gpu_buffer :: proc(cmdbuf: ^sdl3.GPUCommandBuffer, gpu: ^sdl3.GPUDevice, commands: ..Transfer_Command) {
+	transfer_size: u32
+	for desc in commands {
+		transfer_size += u32(len(desc.data))
+	}
+
+	tbuf := must(sdl3.CreateGPUTransferBuffer(gpu, sdl3.GPUTransferBufferCreateInfo{
+		usage = .UPLOAD,
+		size = transfer_size,
+	}))
+	defer sdl3.ReleaseGPUTransferBuffer(gpu, tbuf)
+
+	tmem := cast([^]byte) sdl3.MapGPUTransferBuffer(gpu, tbuf, true)
+	mem_offset: int
+	for desc in commands {
+		mem_offset += copy(tmem[mem_offset:][:len(desc.data)], desc.data)
+	}
+	sdl3.UnmapGPUTransferBuffer(gpu, tbuf)
+
+	offset: u32
+	copy_pass := sdl3.BeginGPUCopyPass(cmdbuf)
+	for desc in commands {
+		size := u32(len(desc.data))
+		src := sdl3.GPUTransferBufferLocation{transfer_buffer = tbuf, offset = offset}
+		sdl3.UploadToGPUBuffer(copy_pass, src, {buffer = desc.buffer, size = size}, false)
+		offset += size
+	}
+	sdl3.EndGPUCopyPass(copy_pass)
+}
+
+mu_input_key :: proc(mu_ctx: ^mu.Context, ev: sdl3.KeyboardEvent) {
+	input := ev.down ? mu.input_key_down : mu.input_key_up
+	#partial switch ev.scancode {
+	case .LSHIFT:    input(mu_ctx, .SHIFT)
+	case .RSHIFT:    input(mu_ctx, .SHIFT)
+	case .LCTRL:     input(mu_ctx, .CTRL)
+	case .RCTRL:     input(mu_ctx, .CTRL)
+	case .LALT:      input(mu_ctx, .ALT)
+	case .RALT:      input(mu_ctx, .ALT)
+	case .RETURN:    input(mu_ctx, .RETURN)
+	case .KP_ENTER:  input(mu_ctx, .RETURN)
+	case .BACKSPACE: input(mu_ctx, .BACKSPACE)
+	case .LEFT:      input(mu_ctx, .LEFT)
+	case .RIGHT:     input(mu_ctx, .RIGHT)
+	case .HOME:      input(mu_ctx, .HOME)
+	case .END:       input(mu_ctx, .END)
+	case .DELETE:    input(mu_ctx, .DELETE)
+	case .A:         input(mu_ctx, .A)
+	case .X:         input(mu_ctx, .X)
+	case .C:         input(mu_ctx, .C)
+	case .V:         input(mu_ctx, .V)
+	}
+}
+
+mu_input_mouse_button :: proc(mu_ctx: ^mu.Context, ev: sdl3.MouseButtonEvent) {
+	input := ev.down ? mu.input_mouse_down : mu.input_mouse_up
+	switch ev.button {
+	case sdl3.BUTTON_LEFT:   input(mu_ctx, i32(ev.x), i32(ev.y), .LEFT)
+	case sdl3.BUTTON_RIGHT:  input(mu_ctx, i32(ev.x), i32(ev.y), .RIGHT)
+	case sdl3.BUTTON_MIDDLE: input(mu_ctx, i32(ev.x), i32(ev.y), .MIDDLE)
+	}
 }

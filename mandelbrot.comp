@@ -1,13 +1,5 @@
 #version 430
 
-#ifndef R
-#define R 20
-#endif
-
-#ifndef MAX_ITER
-#define MAX_ITER 400
-#endif
-
 #ifndef CELL_SIZE
 #define CELL_SIZE 8
 #endif
@@ -22,6 +14,10 @@ layout(set = 2, binding = 0, std140) uniform ViewBox {
     dvec2 min_bounds;
     dvec2 max_bounds;
 };
+layout(set = 2, binding = 1, std140) uniform Params {
+    float max_iter;
+    float escape_radius;
+};
 
 dvec2 remap(dvec2 old_value, dvec2 old_min, dvec2 old_max, dvec2 new_min, dvec2 new_max) {
     dvec2 old_range = old_max - old_min;
@@ -30,7 +26,7 @@ dvec2 remap(dvec2 old_value, dvec2 old_min, dvec2 old_max, dvec2 new_min, dvec2 
 }
 
 vec4 colormap_lookup(float mu) {
-    float v = pow(mu / MAX_ITER, 0.5) * float(palette.length() - 1);
+    float v = pow(mu / max_iter, 0.5) * float(palette.length() - 1);
     vec4 c1 = palette[int(floor(v))];
     vec4 c2 = palette[int(ceil(v))];
     return mix(c1, c2, fract(v));
@@ -47,21 +43,21 @@ void main() {
     dvec2 c = remap(gl_GlobalInvocationID.xy, dvec2(0), imageSize(img), min_bounds, max_bounds);
     dvec2 z = dvec2(0);
 
-    double R2 = R * R;
-    int iter_count = 0;
+    double r2 = escape_radius * escape_radius;
+    float iter_count = 0;
     while (true) {
         z = f(z, c);
         iter_count++;
-        if (dot(z, z) > R2) break;
-        if (iter_count > MAX_ITER) break;
+        if (dot(z, z) > r2) break;
+        if (iter_count > max_iter) break;
     }
-   
+
     /*
         Algorithm taken from:
         https://web.archive.org/web/20200214073730/http://linas.org/art-gallery/escape/escape.html
     */
     vec4 color_value = vec4(0, 0, 0, 1);
-    if (iter_count < MAX_ITER) {
+    if (iter_count < max_iter) {
         z = f(z, c); iter_count++;    // a couple of extra iterations helps
         z = f(z, c); iter_count++;    // decrease the size of the error term.
         float modulus = sqrt(float(dot(z, z)));
