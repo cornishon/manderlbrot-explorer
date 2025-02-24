@@ -142,19 +142,41 @@ main :: proc() {
 
 		mu.begin(mu_ctx)
 		if mu.window(mu_ctx, "Press 'C' to center the view, mouse to pan and zoom", {0, 0, 300, 200}) {
-			mu.layout_row(mu_ctx, {90, -1})
+			cnt := mu.get_current_container(mu_ctx)
+			z := f32(zoom_level)
+			center := (canvas.max_bounds + canvas.min_bounds)/2
 
+			label_width :: 90
+			button_width :: 40
+			slider_width := cnt.body.w - label_width - 2*button_width - 3*mu_ctx.style.spacing - 2*mu_ctx.style.padding
+
+			mu.layout_row(mu_ctx, {label_width, slider_width, button_width, button_width})
 			mu.label(mu_ctx, "Max Iterations:")
 			if .CHANGE in mu.slider(mu_ctx, &params.max_iter, 50, 2000, 10) {
 				canvas.dirty = true
 			}
+			if .SUBMIT in mu.button(mu_ctx, "-100") {
+				params.max_iter -= 100
+				canvas.dirty = true
+			}
+			if .SUBMIT in mu.button(mu_ctx, "+100") {
+				params.max_iter += 100
+				canvas.dirty = true
+			}
 
-			center := (canvas.max_bounds + canvas.min_bounds)/2
+			mu.layout_row(mu_ctx, {label_width, slider_width, button_width, button_width})
 			mu.label(mu_ctx, "Zoom Level:")
-			z := f32(zoom_level)
 			if .CHANGE in mu.slider(mu_ctx, &z, 1.0, 48.0, ZOOM_SPEED) {
 				zoom(&canvas, center, math.pow(2, zoom_level - f64(z)))
 				zoom_level = f64(z)
+			}
+			if .SUBMIT in mu.button(mu_ctx, "-0.25") {
+				zoom(&canvas, center, math.pow_f64(2, ZOOM_SPEED))
+				zoom_level -= ZOOM_SPEED
+			}
+			if .SUBMIT in mu.button(mu_ctx, "+0.25") {
+				zoom(&canvas, center, math.pow_f64(2, -ZOOM_SPEED))
+				zoom_level += ZOOM_SPEED
 			}
 
 			mu.layout_row(mu_ctx, {-1})
