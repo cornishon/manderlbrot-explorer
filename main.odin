@@ -106,14 +106,17 @@ main :: proc() {
 				mu.input_text(mu_ctx, string(ev.text.text))
 			case .KEY_DOWN:
 				#partial switch ev.key.scancode {
+				case .C:
+					pan(&canvas, (canvas.max_bounds + canvas.min_bounds)/2 - mouse_coords)
+					w, h: i32; sdl3.GetWindowSize(window, &w, &h)
+					sdl3.WarpMouseInWindow(window, f32(w)/2, f32(h)/2)
 				case .ESCAPE:
 					break main_loop
 				case .F11:
 					fullscreen = !fullscreen
 					sdl3.SetWindowFullscreen(window, fullscreen)
-				case:
-					mu_input_key(mu_ctx, ev.key)
 				}
+				mu_input_key(mu_ctx, ev.key)
 			case .KEY_UP:
 				mu_input_key(mu_ctx, ev.key)
 			case .MOUSE_WHEEL:
@@ -138,7 +141,7 @@ main :: proc() {
 		}
 
 		mu.begin(mu_ctx)
-		if mu.window(mu_ctx, "Controls", {0, 0, 300, 200}) {
+		if mu.window(mu_ctx, "Press 'C' to center the view, mouse to pan and zoom", {0, 0, 300, 200}) {
 			mu.layout_row(mu_ctx, {90, -1})
 
 			mu.label(mu_ctx, "Max Iterations:")
