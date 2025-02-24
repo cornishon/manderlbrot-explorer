@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:math"
 import "core:slice"
 import "core:strings"
-import "core:math/linalg/glsl"
+import m "core:math/linalg/glsl"
 import "vendor:sdl3"
 import mu "vendor:microui"
 
@@ -16,13 +16,13 @@ ZOOM_SPEED :: 0.25
 CELL_SIZE :: #config(CELL_SIZE, 8)
 
 View_Box :: struct {
-	min_bounds: [2]f64,
-	max_bounds: [2]f64,
+	min_bounds: m.dvec2,
+	max_bounds: m.dvec2,
 }
 
 Canvas :: struct {
 	using view_box: View_Box,
-	size: [2]f64,
+	size: m.dvec2,
 	texture: ^sdl3.GPUTexture,
 	palette_buffer: ^sdl3.GPUBuffer,
 	dirty: bool,
@@ -49,8 +49,8 @@ main :: proc() {
 			return
 		},
 	)
-	mu_ctx.style.colors[.WINDOW_BG].a = 127
-	mu_ctx.style.colors[.PANEL_BG].a = 127
+	mu_ctx.style.colors[.WINDOW_BG].a = 200
+	mu_ctx.style.colors[.PANEL_BG].a = 200
 	mu_ctx.text_width = mu.default_atlas_text_width
 	mu_ctx.text_height = mu.default_atlas_text_height
 
@@ -91,6 +91,7 @@ main :: proc() {
 
 	ev: sdl3.Event
 	fullscreen: bool
+	mouse_coords: m.dvec2
 	zoom_level := 3.0
 
 	must(sdl3.StartTextInput(window))
@@ -118,24 +119,26 @@ main :: proc() {
 			case .MOUSE_WHEEL:
 				mu.input_scroll(mu_ctx, i32(ev.wheel.x) * 30, i32(ev.wheel.y) * -30)
 				if mu_ctx.hover_root == nil {
-					mouse_position := screen_to_world(canvas, {f64(ev.wheel.mouse_x), f64(ev.wheel.mouse_y)})
+					mouse_coords = screen_to_world(canvas, ev.wheel.mouse_x, ev.wheel.mouse_y)
 					t := math.sign(f64(ev.wheel.y))
-					zoom(&canvas, mouse_position, math.pow(2, -ZOOM_SPEED * t))
+					zoom(&canvas, mouse_coords, math.pow(2, -ZOOM_SPEED * t))
 					zoom_level += t * ZOOM_SPEED
 				}
 			case .MOUSE_BUTTON_UP, .MOUSE_BUTTON_DOWN:
 				mu_input_mouse_button(mu_ctx, ev.button)
 			case .MOUSE_MOTION:
-				mu.input_mouse_move(mu_ctx, i32(ev.motion.x), i32(ev.motion.y))
-				if mu_ctx.hover_root == nil && .LEFT in ev.motion.state {
-					delta := screen_to_world(canvas, {f64(ev.motion.xrel), f64(ev.motion.yrel)}) - canvas.min_bounds
+				m := ev.motion
+				mouse_coords = screen_to_world(canvas, m.x, m.y)
+				mu.input_mouse_move(mu_ctx, i32(m.x), i32(m.y))
+				if mu_ctx.hover_root == nil && .LEFT in m.state {
+					delta := screen_to_world(canvas, m.xrel, m.yrel) - canvas.min_bounds
 					pan(&canvas, delta)
 				}
 			}
 		}
 
 		mu.begin(mu_ctx)
-		if mu.window(mu_ctx, "Controls", {0, 0, 240, 150}) {
+		if mu.window(mu_ctx, "Controls", {0, 0, 300, 200}) {
 			mu.layout_row(mu_ctx, {90, -1})
 
 			mu.label(mu_ctx, "Max Iterations:")
@@ -143,13 +146,19 @@ main :: proc() {
 				canvas.dirty = true
 			}
 
+			center := (canvas.max_bounds + canvas.min_bounds)/2
 			mu.label(mu_ctx, "Zoom Level:")
 			z := f32(zoom_level)
 			if .CHANGE in mu.slider(mu_ctx, &z, 1.0, 48.0, ZOOM_SPEED) {
-				center := (canvas.max_bounds + canvas.min_bounds)/2
 				zoom(&canvas, center, math.pow(2, zoom_level - f64(z)))
 				zoom_level = f64(z)
 			}
+
+			mu.layout_row(mu_ctx, {-1})
+			mu.text(mu_ctx, fmt.tprintf(" center x = {}",  center.x))
+			mu.text(mu_ctx, fmt.tprintf(" center y = {}", -center.y))
+			mu.text(mu_ctx, fmt.tprintf(" mouse x = {}",  mouse_coords.x))
+			mu.text(mu_ctx, fmt.tprintf(" mouse y = {}", -mouse_coords.y))
 		}
 		mu.end(mu_ctx)
 
@@ -266,29 +275,30 @@ canvas_resize :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, width, height: u32)
 	}))
 }
 
-pan :: proc(canvas: ^Canvas, delta: [2]f64) {
+pan :: proc(canvas: ^Canvas, delta: m.dvec2) {
 	canvas.min_bounds -= delta
 	canvas.max_bounds -= delta
 	canvas.dirty = true
 }
 
-zoom :: proc(canvas: ^Canvas, pivot: [2]f64, scale: f64) {
+zoom :: proc(canvas: ^Canvas, pivot: m.dvec2, scale: f64) {
 	zoom_around(&canvas.min_bounds, pivot, scale)
 	zoom_around(&canvas.max_bounds, pivot, scale)
 	canvas.dirty = true
 }
 
-zoom_around :: proc(v: ^[2]f64, pivot: [2]f64, zoom: f64) {
+zoom_around :: proc(v: ^m.dvec2, pivot: m.dvec2, zoom: f64) {
 	v^ -= pivot
 	v^ *= zoom
 	v^ += pivot
 }
 
-screen_to_world :: proc(c: Canvas, v: [2]f64) -> [2]f64 {
+screen_to_world :: proc(c: Canvas, x, y: f32) -> m.dvec2 {
+	v := m.dvec2{f64(x), f64(y)}
 	return v * (c.max_bounds - c.min_bounds) / c.size + c.min_bounds
 }
 
-canvas_init :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, size: [2]f64, vb: View_Box) {
+canvas_init :: proc(canvas: ^Canvas, gpu: ^sdl3.GPUDevice, size: m.dvec2, vb: View_Box) {
 	canvas.view_box = vb
 	canvas.size = size
 	canvas_resize(canvas, gpu, u32(size.x), u32(size.y))
@@ -828,7 +838,7 @@ ui_draw :: proc(cmdbuf: ^sdl3.GPUCommandBuffer, ui_ctx: ^UI_Context, gpu: ^sdl3.
 		)
 	}
 
-	mvp := glsl.mat4Ortho3d(0, f32(width), f32(height), 0, 0, 1)
+	mvp := m.mat4Ortho3d(0, f32(width), f32(height), 0, 0, 1)
 	sdl3.PushGPUVertexUniformData(cmdbuf, 0, &mvp, size_of(mvp))
 
 	render_pass := sdl3.BeginGPURenderPass(cmdbuf, color_target, 1, nil)
